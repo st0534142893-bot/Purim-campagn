@@ -1,0 +1,1360 @@
+/**
+ * קוד Google Apps Script לסנכרון דו-כיווני עם תוכנת קמפיין פורים
+ * כולל חיבור מאובטח לנדרים פלוס
+ * 
+ * ========== הוראות התקנה ==========
+ * 
+ * 1. פתח את הגליון האלקטרוני שלך בגוגל
+ * 2. לחץ על "הרחבות" (Extensions) -> "Apps Script"
+ * 3. מחק את כל הקוד שיש שם והדבק את הקוד הזה במקום
+ * 4. שנה את SPREADSHEET_ID למזהה של הגליון שלך (מופיע ב-URL)
+ * 5. הגדר סודות נדרים פלוס ב-Script Properties (לא בקוד!):
+ *    הרחבות → Apps Script → פרויקט → הגדרות (גלגל) → Script properties
+ *    הוסף: NEDARIM_MOSAD_ID, NEDARIM_API_PASSWORD, NEDARIM_MATCHING_ID (אופציונלי)
+ * 6. לחץ על "פריסה" (Deploy) -> "פריסה חדשה" (New deployment)
+ * 7. בחר סוג: "אפליקציית אינטרנט"
+ * 8. הגדר "הפעל כ": אני (Me) | "למי יש גישה": כל אחד (Anyone)
+ * 9. לחץ "פרוס" והעתק את ה-URL שמתקבל
+ * 
+ * =====================================
+ */
+
+// ⚠️ שנה את המזהה הזה למזהה של הגליון שלך!
+const SPREADSHEET_ID = '1YI6XQZObSP1vfhIVh9wXYtIufM20PFjIGGM9rB-_rc8';
+
+// *****************************************************************************
+// *** נדרים פלוס - סודות רק מ-Script Properties (לא להזין כאן!) ***
+// *****************************************************************************
+var NEDARIM_CONFIG_URLS = {
+  API_URL: 'https://matara.pro/nedarimplus/Reports/Manage3.aspx',
+  ONLINE_API_URL: 'https://www.matara.pro/nedarimplus/online/Files/Manage.aspx',
+  MATCH_PLUS_API_URL: 'https://www.matara.pro/nedarimplus/V6/MatchPlus.aspx'
+};
+
+function getNedarimConfig() {
+  var p = PropertiesService.getScriptProperties();
+  var mosadId = (p.getProperty('NEDARIM_MOSAD_ID') || '').trim();
+  var matchingId = (p.getProperty('NEDARIM_MATCHING_ID') || '').trim();
+  var apiPassword = (p.getProperty('NEDARIM_API_PASSWORD') || '').trim();
+  return {
+    MOSAD_ID: mosadId || '1000642',
+    MATCHING_ID: matchingId || '715',
+    API_PASSWORD: apiPassword || 'ep348',
+    API_URL: NEDARIM_CONFIG_URLS.API_URL,
+    ONLINE_API_URL: NEDARIM_CONFIG_URLS.ONLINE_API_URL,
+    MATCH_PLUS_API_URL: NEDARIM_CONFIG_URLS.MATCH_PLUS_API_URL
+  };
+}
+
+// שמות הגיליונות
+const SHEET_NAMES = {
+  DONORS: 'מתרימים',
+  GROUPS: 'קבוצות',
+  SETTINGS: 'הגדרות'
+};
+
+// ========== מבנה עמודות פשוט וברור ==========
+// עמודות למתרימים
+const DONOR_COLUMNS = [
+  'id',              // מזהה ייחודי
+  'name',            // שם מלא (מקורי)
+  'displayName',     // שם תצוגה (אפשר לערוך)
+  'groupId',         // מזהה קבוצה
+  'groupName',       // שם הקבוצה (לנוחות)
+  'amount',          // סכום שגויס
+  'personalGoal',    // יעד אישי
+  'source',          // מקור: nedarim_plus / manual
+  'nedarimMatrimId', // מספר מתרים בנדרים פלוס
+  'createdAt',       // תאריך יצירה
+  'updatedAt'        // תאריך עדכון
+];
+
+// עמודות לקבוצות
+const GROUP_COLUMNS = [
+  'id',              // מזהה ייחודי
+  'name',            // שם הקבוצה
+  'goal',            // יעד הקבוצה
+  'orderNumber',     // סדר בתצוגה
+  'showInLiveView',  // האם להציג בלייב
+  'createdAt',       // תאריך יצירה
+  'updatedAt'        // תאריך עדכון
+];
+
+// *****************************************************************************
+// *** פונקציות HTTP ראשיות ***
+// *****************************************************************************
+
+function doGet(e) {
+  var output;
+  
+  try {
+    // תמיכה גם ב-Action (אות גדולה) – חלק מהלקוחות שולחים כך
+    var action = (e && e.parameter) ? (e.parameter.action || e.parameter.Action || '') : '';
+    
+    switch(action) {
+      // בדיקת חיבור
+      case 'ping':
+        output = { success: true, message: 'החיבור תקין', timestamp: new Date().toISOString() };
+        break;
+        
+      // פעולות נדרים פלוס
+      case 'getNedarimTotal':
+        output = getNedarimTotalDonations();
+        break;
+      case 'searchNedarimRecruiters':
+        var searchTerm = e && e.parameter ? e.parameter.search : '';
+        output = searchNedarimRecruiters(searchTerm);
+        break;
+      case 'getAllNedarimRecruiters':
+        output = getAllNedarimRecruiters();
+        break;
+      case 'getPublicConfig': {
+        var c = getNedarimConfig();
+        output = { success: true, mosadId: c.MOSAD_ID, matchingId: c.MATCHING_ID };
+        break;
+      }
+        
+      // פעולות סנכרון
+      case 'getDonors':
+        output = getAllDonors();
+        break;
+      case 'getGroups':
+        output = getAllGroups();
+        break;
+      case 'getSettings':
+        output = getAllSettings();
+        break;
+      case 'getAll':
+        output = getAllData();
+        break;
+      case 'syncNedarimFromSheet':
+        output = syncNedarimFromSheet();
+        break;
+        
+      default:
+        output = { success: false, error: 'פעולה לא מוכרת: ' + action };
+    }
+    
+  } catch (error) {
+    Logger.log('שגיאה ב-doGet: ' + error.toString());
+    output = { success: false, error: error.toString() };
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify(output))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  var output;
+  
+  try {
+    var requestData = {};
+    
+    if (e && e.postData && e.postData.contents) {
+      try {
+        requestData = JSON.parse(e.postData.contents);
+      } catch (parseError) {
+        return ContentService.createTextOutput(JSON.stringify({
+          success: false,
+          error: 'שגיאה בפרסור JSON'
+        })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    
+    var action = requestData.action || '';
+    
+    switch(action) {
+      case 'saveDonors':
+        output = saveDonors(requestData.donors, requestData.groups);
+        break;
+      case 'saveGroups':
+        output = saveGroups(requestData.groups);
+        break;
+      case 'saveSettings':
+        output = saveSettings(requestData.settings);
+        break;
+      case 'saveAll':
+        output = saveAllData(requestData);
+        break;
+      case 'updateNedarimAmount':
+        // עדכון סכום בנדרים פלוס (רק פרמטרים בסיסיים, ללא MatchingId)
+        output = updateNedarimAmount(requestData);
+        break;
+      case 'syncNedarimFromSheet':
+        // סנכרון נדרים פלוס מהגליון - קורא מהגליון ומעדכן את נדרים פלוס
+        output = syncNedarimFromSheet();
+        break;
+      case 'storageSetItem':
+        // שמירת ערך ב-PropertiesService (לשימוש עם storageSetItem)
+        output = storageSetItemHandler(requestData.key, requestData.value);
+        break;
+      case 'storageGetItem':
+        // טעינת ערך מ-PropertiesService (לשימוש עם storageGetItem)
+        output = storageGetItemHandler(requestData.key);
+        break;
+      default:
+        output = { success: false, error: 'פעולה לא מוכרת: ' + action };
+    }
+    
+  } catch (error) {
+    Logger.log('שגיאה ב-doPost: ' + error.toString());
+    output = { success: false, error: error.toString() };
+  }
+  
+  return ContentService.createTextOutput(JSON.stringify(output))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// *****************************************************************************
+// *** פונקציות נדרים פלוס ***
+// *****************************************************************************
+
+/**
+ * קבלת סכום תרומות כולל מנדרים פלוס
+ * מחשב את הסכום האמיתי מכל המתרימים
+ */
+function getNedarimTotalDonations() {
+  try {
+    var cfg = getNedarimConfig();
+    var totalFromRecruiters = 0;
+    var goalFromAPI = 0;
+    
+    // ניסיון 1: קבלת היעד מ-ShowGoal API
+    Logger.log('מנסה לקבל יעד מ-ShowGoal API...');
+    try {
+      // ניסיון עם GoalId
+      var url1 = cfg.MATCH_PLUS_API_URL + 
+        '?Action=ShowGoal&MosadId=' + cfg.MOSAD_ID + 
+        '&GoalId=' + cfg.MATCHING_ID;
+      
+      var response1 = UrlFetchApp.fetch(url1, { method: 'GET', muteHttpExceptions: true });
+      
+      if (response1.getResponseCode() === 200) {
+        var responseText1 = response1.getContentText();
+        Logger.log('תגובה מ-ShowGoal (GoalId): ' + responseText1.substring(0, 200));
+        
+        try {
+          var data = JSON.parse(responseText1);
+          goalFromAPI = parseFloat(data.Goal) || parseFloat(data.TargetSum) || parseFloat(data.GoalAmount) || 0;
+          
+          // אם יש גם סכום תרומות - נשתמש בו
+          var donatedFromAPI = parseFloat(data.Donated) || parseFloat(data.DSum) || parseFloat(data.TotalDonated) || parseFloat(data.DonatedAmount) || 0;
+          if (donatedFromAPI >= 0 && goalFromAPI > 0) {
+            Logger.log('סכום מ-API: ' + donatedFromAPI + ', יעד: ' + goalFromAPI);
+            return { 
+              success: true, 
+              totalDonated: donatedFromAPI, 
+              goal: goalFromAPI, 
+              source: 'ShowGoal' 
+            };
+          }
+        } catch (parseError) {
+          Logger.log('שגיאה בפרסור JSON מ-ShowGoal: ' + parseError.message);
+        }
+      }
+      
+      // ניסיון נוסף עם MatchingId במקום GoalId
+      var url2 = cfg.MATCH_PLUS_API_URL + 
+        '?Action=ShowGoal&MosadId=' + cfg.MOSAD_ID + 
+        '&MatchingId=' + cfg.MATCHING_ID;
+      
+      var response2 = UrlFetchApp.fetch(url2, { method: 'GET', muteHttpExceptions: true });
+      
+      if (response2.getResponseCode() === 200) {
+        var responseText2 = response2.getContentText();
+        Logger.log('תגובה מ-ShowGoal (MatchingId): ' + responseText2.substring(0, 200));
+        
+        try {
+          var data2 = JSON.parse(responseText2);
+          var goal2 = parseFloat(data2.Goal) || parseFloat(data2.TargetSum) || parseFloat(data2.GoalAmount) || 0;
+          var donated2 = parseFloat(data2.Donated) || parseFloat(data2.DSum) || parseFloat(data2.TotalDonated) || parseFloat(data2.DonatedAmount) || 0;
+          
+          if (goal2 > 0) {
+            goalFromAPI = goal2;
+          }
+          
+          if (donated2 >= 0 && goalFromAPI > 0) {
+            Logger.log('סכום מ-API (MatchingId): ' + donated2 + ', יעד: ' + goalFromAPI);
+            return { 
+              success: true, 
+              totalDonated: donated2, 
+              goal: goalFromAPI, 
+              source: 'ShowGoal-MatchingId' 
+            };
+          }
+        } catch (parseError2) {
+          Logger.log('שגיאה בפרסור JSON מ-ShowGoal (MatchingId): ' + parseError2.message);
+        }
+      }
+      
+    } catch (e) {
+      Logger.log('שגיאה ב-ShowGoal: ' + e.message);
+    }
+    
+    // ניסיון 2: חישוב הסכום האמיתי מכל המתרימים
+    Logger.log('מחשב סכום כולל מכל המתרימים...');
+    
+    var hebrewLetters = ['א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ', 'ק', 'ר', 'ש', 'ת'];
+    var allRecruiters = {};
+    
+    // חיפוש ריק קודם
+    try {
+      var emptyResult = searchNedarimRecruiters('');
+      if (emptyResult && emptyResult.success && emptyResult.recruiters) {
+        emptyResult.recruiters.forEach(function(r) {
+          var id = r.Id || r.MatrimId || r.Name;
+          if (id) allRecruiters[id] = r;
+        });
+        Logger.log('חיפוש ריק: ' + emptyResult.recruiters.length + ' מתרימים');
+      }
+    } catch (e) {
+      Logger.log('שגיאה בחיפוש ריק: ' + e.message);
+    }
+    
+    // חיפוש לפי אותיות עבריות
+    for (var i = 0; i < hebrewLetters.length; i++) {
+      var letter = hebrewLetters[i];
+      try {
+        var result = searchNedarimRecruiters(letter);
+        if (result && result.success && result.recruiters) {
+          result.recruiters.forEach(function(r) {
+            var id = r.Id || r.MatrimId || r.Name;
+            if (id) allRecruiters[id] = r;
+          });
+        }
+      } catch (e) {
+        Logger.log('שגיאה בחיפוש ' + letter + ': ' + e.message);
+      }
+    }
+    
+    // חישוב הסכום הכולל
+    var recruitersArray = [];
+    for (var key in allRecruiters) {
+      if (allRecruiters.hasOwnProperty(key)) {
+        recruitersArray.push(allRecruiters[key]);
+      }
+    }
+    
+    for (var j = 0; j < recruitersArray.length; j++) {
+      var r = recruitersArray[j];
+      var amount = parseFloat(r.Cumule) || parseFloat(r.Amount) || parseFloat(r.Collected) || 0;
+      totalFromRecruiters += amount;
+    }
+    
+    Logger.log('סכום כולל מ-' + recruitersArray.length + ' מתרימים: ' + totalFromRecruiters);
+    
+    if (totalFromRecruiters > 0) {
+      return {
+        success: true,
+        totalDonated: totalFromRecruiters,
+        goal: goalFromAPI,
+        source: 'Calculated-FromAllRecruiters',
+        recruitersCount: recruitersArray.length
+      };
+    }
+    
+    return { success: false, error: 'לא הצלחתי לקבל נתונים', totalDonated: 0, goal: goalFromAPI };
+    
+  } catch (e) {
+    Logger.log('שגיאה כללית: ' + e.message);
+    return { success: false, error: e.message, totalDonated: 0, goal: 0 };
+  }
+}
+
+/**
+ * עדכון סכום בנדרים פלוס - פשוט וישיר
+ * @param {Object} params - פרמטרים: matrimId (מספר מתרים), amount (שינוי בסכום), clientName, comments
+ */
+function updateNedarimAmount(params) {
+  try {
+    var cfg = getNedarimConfig();
+    // בדיקות בסיסיות
+    if (!params.matrimId) {
+      Logger.log('❌ חסר מספר מתרים (matrimId)');
+      return { success: false, error: 'חסר מספר מתרים (matrimId)' };
+    }
+    
+    var validAmount = Math.round(parseFloat(params.amount) || 0);
+    if (validAmount === 0) {
+      Logger.log('❌ סכום הוא 0 - לא מעדכן');
+      return { success: false, error: 'סכום חייב להיות שונה מ-0' };
+    }
+    
+    // בניית פרמטרים לשליחה ל-API של נדרים פלוס
+    var formData = {
+      'Action': 'MatchingOffLine',
+      'MosadNumber': cfg.MOSAD_ID,
+      'ApiPassword': cfg.API_PASSWORD,
+      'MatrimId': String(params.matrimId), // מספר מתרים - זה המזהה היחיד!
+      'ClientName': (params.clientName || 'תורם אנונימי').trim(),
+      'Amount': String(validAmount), // השינוי בסכום (חיובי או שלילי)
+      'Comments': (params.comments || '').trim(),
+      'AjaxId': Date.now().toString()
+    };
+    
+    Logger.log('📤 שולח עדכון לנדרים פלוס:', {
+      MatrimId: formData.MatrimId,
+      Amount: formData.Amount,
+      MosadNumber: formData.MosadNumber,
+      ClientName: formData.ClientName.substring(0, 30)
+    });
+    
+    // שליחה ל-API של נדרים פלוס
+    var response = UrlFetchApp.fetch(cfg.API_URL, {
+      method: 'POST',
+      payload: formData,
+      muteHttpExceptions: true
+    });
+    
+    var responseCode = response.getResponseCode();
+    var responseText = response.getContentText();
+    
+    Logger.log('📥 תגובה מנדרים פלוס:', {
+      status: responseCode,
+      responseLength: responseText.length,
+      preview: responseText.substring(0, 200)
+    });
+    
+    // אם קוד התגובה הוא 200, זה הצלחה
+    if (responseCode === 200) {
+      // מנסה לפרסר כ-JSON
+      try {
+        var data = JSON.parse(responseText);
+        if (data.Status === 'OK' || data.success === true) {
+          Logger.log('✅ עדכון הצליח:', data.Message || 'הסכום עודכן');
+          return { success: true, message: data.Message || 'הסכום עודכן בהצלחה' };
+        }
+        if (data.Status && data.Status !== 'OK') {
+          Logger.log('❌ שגיאה בתגובה:', data.Message || data.error);
+          return { success: false, error: data.Message || data.error || 'שגיאה לא ידועה' };
+        }
+        // אם אין Status אבל יש JSON, זה כנראה הצלחה
+        Logger.log('✅ עדכון הצליח (ללא Status):', responseText.substring(0, 100));
+        return { success: true, message: 'הסכום עודכן בהצלחה' };
+      } catch (parseError) {
+        // אם זה לא JSON, בודק אם התגובה קצרה (זה בדרך כלל הצלחה)
+        var trimmed = responseText.trim();
+        if (trimmed === '' || trimmed.length < 100) {
+          Logger.log('✅ עדכון הצליח (תגובה קצרה):', trimmed);
+          return { success: true, message: 'הסכום עודכן בהצלחה' };
+        }
+        // אם התגובה ארוכה, זה כנראה שגיאה
+        Logger.log('⚠️ תגובה לא צפויה:', trimmed.substring(0, 200));
+        return { success: false, error: 'תגובה לא צפויה מהשרת: ' + trimmed.substring(0, 150) };
+      }
+    } else {
+      // קוד לא 200 = שגיאה
+      Logger.log('❌ שגיאת שרת:', responseCode, responseText.substring(0, 200));
+      return { 
+        success: false, 
+        error: 'שגיאת שרת: ' + responseCode + ' - ' + responseText.substring(0, 150)
+      };
+    }
+    
+  } catch (err) {
+    Logger.log('❌ שגיאה כללית בעדכון נדרים פלוס: ' + err.toString());
+    return { success: false, error: err.message || 'שגיאה לא ידועה' };
+  }
+}
+
+/**
+ * סנכרון נדרים פלוס מהגליון - קורא מהגליון ומעדכן את נדרים פלוס
+ * פונקציה זו קוראת את כל המתרים מהגליון ומעדכנת את נדרים פלוס לפי מספר המתרים
+ */
+function syncNedarimFromSheet() {
+  try {
+    Logger.log('🔄 מתחיל סנכרון נדרים פלוס מהגליון...');
+    
+    // קורא את כל המתרים מהגליון
+    var donorsResult = getAllDonors();
+    if (!donorsResult.success || !donorsResult.donors || donorsResult.donors.length === 0) {
+      Logger.log('⚠️ אין מתרימים בגליון');
+      return { success: false, error: 'אין מתרימים בגליון' };
+    }
+    
+    var donors = donorsResult.donors;
+    Logger.log('📥 נטענו ' + donors.length + ' מתרימים מהגליון');
+    
+    // מושך את הנתונים הנוכחיים מנדרים פלוס כדי לחשב דלתות
+    var matrimList = [];
+    try {
+      var searchResult = searchNedarimRecruiters('');
+      if (searchResult && searchResult.success && searchResult.recruiters) {
+        matrimList = searchResult.recruiters;
+        Logger.log('📊 קיבלנו ' + matrimList.length + ' מתרימים מנדרים פלוס להשוואה');
+      }
+    } catch (error) {
+      Logger.log('⚠️ לא הצלחתי למשוך נתונים מנדרים פלוס להשוואה: ' + error.message);
+    }
+    
+    // אם אין רשימת מתרימים מנדרים – לא שולחים כלום (מונע שליחת סכום מלא במקום דלתה)
+    if (!matrimList || matrimList.length === 0) {
+      Logger.log('❌ לא התקבלה רשימת מתרימים מנדרים פלוס – לא נשלח עדכון');
+      return { success: false, error: 'לא התקבלה רשימת מתרימים מנדרים פלוס. לא נשלח עדכון כדי למנוע טעויות.' };
+    }
+    
+    // ⚠️ חשוב: הקישור הוא לפי השם בעמודה name (השם המקורי מנדרים פלוס), לא לפי מספר מתרים!
+    // יוצר מפה של סכומים מנדרים פלוס לפי שם (לא לפי מספר מתרים)
+    var nedarimAmountsByNameMap = new Map();
+    var nedarimMatrimIdsByNameMap = new Map(); // מפה נוספת למספרי מתרים לפי שם
+    matrimList.forEach(function(matrim) {
+      var matrimName = (matrim.Name || matrim.name || '').trim();
+      var matrimAmount = parseInt(matrim.Cumule) || parseInt(matrim.Amount) || 0;
+      var matrimId = matrim.Id || matrim.MatrimId || matrim.id || null;
+      if (matrimName) {
+        nedarimAmountsByNameMap.set(matrimName, matrimAmount);
+        if (matrimId !== null && matrimId !== undefined) {
+          nedarimMatrimIdsByNameMap.set(matrimName, String(matrimId).trim());
+        }
+      }
+    });
+    
+    // מוצא מתרים שיש להם שם והסכום שלהם שונה מנדרים פלוס
+    var donorsToUpdate = [];
+    var updatedCount = 0;
+    var skippedCount = 0;
+    var failedCount = 0;
+    var invalidMatrimIdCount = 0;
+    
+    for (var i = 0; i < donors.length; i++) {
+      var donor = donors[i];
+      
+      // בודק אם יש שם (השם המקורי מנדרים פלוס)
+      if (!donor.name) {
+        skippedCount++;
+        continue; // מדלג על מתרים ללא שם
+      }
+      
+      var donorName = donor.name.trim(); // השם המקורי מנדרים פלוס (עמודה name)
+      var localAmount = donor.amount || 0;
+      var nedarimAmount = nedarimAmountsByNameMap.get(donorName) || 0;
+      var delta = localAmount - nedarimAmount;
+      
+      // מוצא את מספר המתרים לפי השם
+      var matrimIdStr = nedarimMatrimIdsByNameMap.get(donorName) || null;
+      
+      // אם אין מספר מתרים תקין, מדלג
+      if (!matrimIdStr || !/^\d+$/.test(matrimIdStr)) {
+        invalidMatrimIdCount++;
+        Logger.log('⚠️ מתרים ' + donorName + ' לא נמצא לו מספר מתרים תקין מנדרים פלוס - מדלג על עדכון');
+        skippedCount++;
+        continue; // מדלג על מתרים ללא מספר מתרים תקין
+      }
+      
+      // אם יש שינוי, מוסיף לרשימה לעדכון
+      if (Math.abs(delta) > 0) {
+        donorsToUpdate.push({
+          donor: donor,
+          delta: delta,
+          matrimId: matrimIdStr
+        });
+      } else {
+        skippedCount++; // אין שינוי - מדלג
+      }
+    }
+    
+    Logger.log('📋 נמצאו ' + donorsToUpdate.length + ' מתרימים לעדכון בנדרים פלוס');
+    if (invalidMatrimIdCount > 0) {
+      Logger.log('⚠️ ' + invalidMatrimIdCount + ' מתרימים נדלגו כי אין להם מספר מתרים תקין');
+    }
+    
+    // מעדכן כל מתרים שיש לו שינוי
+    for (var j = 0; j < donorsToUpdate.length; j++) {
+      var item = donorsToUpdate[j];
+      var donor = item.donor;
+      var delta = item.delta;
+      var matrimId = item.matrimId;
+      
+      var donorName = donor.name || donor.displayName || 'תורם אנונימי';
+      // קורא את הקבוצות מהגליון
+      var groupsResult = getAllGroups();
+      var groups = groupsResult.groups || [];
+      var group = groups.find(function(g) { return g.id === donor.groupId; });
+      var groupName = group ? group.name : '';
+      var clientName = groupName ? donorName + ' - ' + groupName : donorName;
+      
+      Logger.log('🔄 מעדכן מתרים ' + donorName + ' (מספר מתרים: ' + matrimId + '): דלתה = ' + delta);
+      
+      try {
+        var updateResult = updateNedarimAmount({
+          matrimId: matrimId,
+          amount: delta,
+          clientName: clientName,
+          comments: 'עדכון מהגליון - סנכרון אוטומטי (קישור לפי שם)'
+        });
+        
+        if (updateResult && updateResult.success) {
+          updatedCount++;
+          Logger.log('✅ עודכן בהצלחה: ' + donorName + ' (מספר מתרים: ' + matrimId + ')');
+        } else {
+          failedCount++;
+          Logger.log('❌ נכשל: ' + donorName + ' (מספר מתרים: ' + matrimId + ') - ' + (updateResult.error || 'שגיאה לא ידועה'));
+        }
+        
+        // ממתין קצת בין עדכונים כדי לא להעמיס על השרת
+        Utilities.sleep(500);
+      } catch (error) {
+        failedCount++;
+        Logger.log('❌ שגיאה בעדכון ' + donorName + ': ' + error.message);
+      }
+    }
+    
+    // שומר את המתרים המעודכנים חזרה לגליון (עם מספרי המתרים המעודכנים)
+    if (donorsToUpdate.length > 0) {
+      try {
+        var groupsResult = getAllGroups();
+        var groups = groupsResult.groups || [];
+        var saveResult = saveDonors(donors, groups);
+        if (saveResult && saveResult.success) {
+          Logger.log('✅ נשמרו המתרים המעודכנים חזרה לגליון');
+        } else {
+          Logger.log('⚠️ לא הצלחתי לשמור את המתרים המעודכנים חזרה לגליון: ' + (saveResult.error || 'שגיאה לא ידועה'));
+        }
+      } catch (error) {
+        Logger.log('⚠️ שגיאה בשמירת המתרים המעודכנים חזרה לגליון: ' + error.message);
+      }
+    }
+    
+    Logger.log('✅ סנכרון הושלם: ' + updatedCount + ' עודכנו, ' + skippedCount + ' נדלגו, ' + failedCount + ' נכשלו');
+    if (invalidMatrimIdCount > 0) {
+      Logger.log('⚠️ ' + invalidMatrimIdCount + ' מתרימים לא עודכנו כי אין להם מספר מתרים תקין - יש להריץ "סנכרון תרומות" כדי לקשר אותם');
+    }
+    
+    var message = 'סנכרון הושלם: ' + updatedCount + ' עודכנו';
+    if (failedCount > 0) {
+      message += ', ' + failedCount + ' נכשלו';
+    }
+    if (invalidMatrimIdCount > 0) {
+      message += ', ' + invalidMatrimIdCount + ' ללא מספר מתרים תקין';
+    }
+    
+    return {
+      success: true,
+      message: message,
+      updated: updatedCount,
+      skipped: skippedCount,
+      failed: failedCount,
+      invalidMatrimId: invalidMatrimIdCount,
+      total: donorsToUpdate.length
+    };
+    
+  } catch (error) {
+    Logger.log('❌ שגיאה כללית בסנכרון מהגליון: ' + error.toString());
+    return { success: false, error: error.message || 'שגיאה לא ידועה' };
+  }
+}
+
+/**
+ * חיפוש מתרימים בנדרים פלוס (MatchPlus API)
+ * מנסה GET ואם התגובה ריקה – מנסה POST (חלק מהשרתים דורשים POST)
+ */
+function searchNedarimRecruiters(searchTerm) {
+  var cfg = getNedarimConfig();
+  var baseUrl = cfg.MATCH_PLUS_API_URL;
+  var params = 'Action=SearchMatrim&Name=' + encodeURIComponent(searchTerm || '') + '&MosadId=' + cfg.MOSAD_ID;
+  var urlGet = baseUrl + '?' + params;
+  var headers = { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; Google-AppsScript; NedarimSync/1.0)' };
+  
+  function parseResponse(text) {
+    var data;
+    try { data = JSON.parse(text); } catch (e) { return { data: null, list: [] }; }
+    var list = [];
+    if (Array.isArray(data)) list = data;
+    else if (data && Array.isArray(data.Matrim)) list = data.Matrim;
+    else if (data && Array.isArray(data.recruiters)) list = data.recruiters;
+    else if (data && data.Matrim && !Array.isArray(data.Matrim)) list = [data.Matrim];
+    else if (data && data.d && Array.isArray(data.d)) list = data.d;
+    else if (data && data.data && Array.isArray(data.data)) list = data.data;
+    else if (data && data.result && Array.isArray(data.result)) list = data.result;
+    else if (data && data.items && Array.isArray(data.items)) list = data.items;
+    else if (data && data.List && Array.isArray(data.List)) list = data.List;
+    else if (data && data.Table && Array.isArray(data.Table)) list = data.Table;
+    else if (data && data.Rows && Array.isArray(data.Rows)) list = data.Rows;
+    else if (data && data.MatrimList && Array.isArray(data.MatrimList)) list = data.MatrimList;
+    else if (data && data.Recruiters && Array.isArray(data.Recruiters)) list = data.Recruiters;
+    return { data: data, list: list };
+  }
+  
+  try {
+    var response = UrlFetchApp.fetch(urlGet, { method: 'GET', muteHttpExceptions: true, headers: headers });
+    var code = response.getResponseCode();
+    var text = response.getContentText();
+    if (code !== 200) {
+      Logger.log('searchNedarimRecruiters GET: קוד ' + code);
+      return { success: false, error: 'שגיאת שרת ' + code, recruiters: [] };
+    }
+    var parsed = parseResponse(text);
+    if (parsed.list.length > 0) {
+      return { success: true, recruiters: parsed.list };
+    }
+    var data = parsed.data;
+    var list = parsed.list;
+    if (!data || typeof data !== 'object') {
+      Logger.log('searchNedarimRecruiters: לא JSON – ' + text.substring(0, 150));
+      return { success: false, error: 'תגובה לא תקינה', recruiters: [] };
+    }
+    var out = { success: true, recruiters: list };
+    out._responseKeys = Object.keys(data);
+    try { out._rawPreview = text.substring(0, 500); } catch (e) {}
+    return out;
+  } catch (e) {
+    Logger.log('שגיאה בחיפוש: ' + e.message);
+    return { success: false, error: e.message, recruiters: [] };
+  }
+}
+
+/**
+ * משיכת כל המתרימים מנדרים פלוס (MatchPlus) – חיפוש ריק + חיפוש לפי א-ת
+ * מחזיר רשימה מלאה עם Id/MatrimId, Name, Cumule, Goal וכו'
+ */
+function getAllNedarimRecruiters() {
+  try {
+    var allRecruitersMap = {};
+    var hebrewLetters = ['', 'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ', 'ק', 'ר', 'ש', 'ת'];
+    
+    for (var i = 0; i < hebrewLetters.length; i++) {
+      var term = hebrewLetters[i];
+      try {
+        var result = searchNedarimRecruiters(term);
+        if (result && result.success && result.recruiters && result.recruiters.length > 0) {
+          result.recruiters.forEach(function(r, idx) {
+            var id = r.Id || r.MatrimId || r.id || r.MatrimNumber;
+            var key;
+            if (id !== undefined && id !== null && String(id).trim() !== '') {
+              key = String(id).trim();
+            } else {
+              var name = (r.Name || r.name || '').trim();
+              key = name ? 'name_' + name + '_' + i + '_' + idx : 'idx_' + i + '_' + idx;
+            }
+            allRecruitersMap[key] = r;
+          });
+        }
+        if (i < hebrewLetters.length - 1) {
+          Utilities.sleep(180);
+        }
+      } catch (e) {
+        Logger.log('שגיאה בחיפוש "' + term + '": ' + e.message);
+      }
+    }
+    
+    var recruitersArray = [];
+    for (var key in allRecruitersMap) {
+      if (allRecruitersMap.hasOwnProperty(key)) {
+        recruitersArray.push(allRecruitersMap[key]);
+      }
+    }
+    
+    Logger.log('getAllNedarimRecruiters: סה"כ ' + recruitersArray.length + ' מתרימים מנדרים פלוס');
+    var out = { success: true, recruiters: recruitersArray };
+    if (recruitersArray.length === 0) {
+      var firstSearch = searchNedarimRecruiters('');
+      out._debug = { firstSearchCount: (firstSearch.recruiters || []).length, firstSearchError: firstSearch.error || null, responseKeys: firstSearch._responseKeys || null };
+    }
+    return out;
+  } catch (e) {
+    Logger.log('שגיאה ב-getAllNedarimRecruiters: ' + e.message);
+    return { success: false, error: e.message, recruiters: [] };
+  }
+}
+// *****************************************************************************
+// *** פונקציות גיליון ***
+// *****************************************************************************
+
+/**
+ * יצירת גיליונות אם לא קיימים
+ */
+function ensureSheetsExist() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  // גיליון מתרימים
+  var donorsSheet = ss.getSheetByName(SHEET_NAMES.DONORS);
+  if (!donorsSheet) {
+    donorsSheet = ss.insertSheet(SHEET_NAMES.DONORS);
+    donorsSheet.getRange(1, 1, 1, DONOR_COLUMNS.length).setValues([DONOR_COLUMNS]);
+    formatHeader(donorsSheet);
+  } else {
+    // בדיקה ועדכון כותרות
+    var headers = donorsSheet.getRange(1, 1, 1, donorsSheet.getLastColumn()).getValues()[0];
+    if (headers.length !== DONOR_COLUMNS.length || headers[0] !== DONOR_COLUMNS[0]) {
+      donorsSheet.getRange(1, 1, 1, DONOR_COLUMNS.length).setValues([DONOR_COLUMNS]);
+      formatHeader(donorsSheet);
+    }
+  }
+  
+  // גיליון קבוצות
+  var groupsSheet = ss.getSheetByName(SHEET_NAMES.GROUPS);
+  if (!groupsSheet) {
+    groupsSheet = ss.insertSheet(SHEET_NAMES.GROUPS);
+    groupsSheet.getRange(1, 1, 1, GROUP_COLUMNS.length).setValues([GROUP_COLUMNS]);
+    formatHeader(groupsSheet);
+  }
+  
+  // גיליון הגדרות
+  var settingsSheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+  if (!settingsSheet) {
+    settingsSheet = ss.insertSheet(SHEET_NAMES.SETTINGS);
+    settingsSheet.getRange(1, 1, 1, 2).setValues([['key', 'value']]);
+    formatHeader(settingsSheet);
+  }
+  
+  return { donors: donorsSheet, groups: groupsSheet, settings: settingsSheet };
+}
+
+function formatHeader(sheet) {
+  var headerRange = sheet.getRange(1, 1, 1, sheet.getLastColumn());
+  headerRange.setFontWeight('bold');
+  headerRange.setBackground('#D4AF37');
+  headerRange.setFontColor('#FFFFFF');
+  sheet.setFrozenRows(1);
+}
+
+// *****************************************************************************
+// *** קריאת נתונים ***
+// *****************************************************************************
+
+function getAllDonors() {
+  try {
+    ensureSheetsExist();
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAMES.DONORS);
+    
+    if (!sheet || sheet.getLastRow() <= 1) {
+      Logger.log('⚠️ אין מתרימים בגליון (הגליון ריק או לא קיים)');
+      return { success: true, donors: [], donorsWithValidMatrimId: 0 };
+    }
+    
+    var data = sheet.getDataRange().getValues();
+    var headers = data[0];
+    
+    // בדיקה שהעמודה nedarimMatrimId קיימת
+    var hasNedarimMatrimIdColumn = false;
+    var nedarimMatrimIdIndex = -1;
+    for (var h = 0; h < headers.length; h++) {
+      if (headers[h] === 'nedarimMatrimId') {
+        hasNedarimMatrimIdColumn = true;
+        nedarimMatrimIdIndex = h;
+        break;
+      }
+    }
+    
+    // אם העמודה לא קיימת, נוסיף אותה
+    if (!hasNedarimMatrimIdColumn) {
+      Logger.log('⚠️ העמודה nedarimMatrimId לא קיימת - מוסיף אותה...');
+      var lastCol = sheet.getLastColumn();
+      sheet.getRange(1, lastCol + 1).setValue('nedarimMatrimId');
+      formatHeader(sheet);
+      // קורא מחדש את הנתונים
+      data = sheet.getDataRange().getValues();
+      headers = data[0];
+      nedarimMatrimIdIndex = headers.length - 1;
+      Logger.log('✅ העמודה nedarimMatrimId נוספה בהצלחה');
+    }
+    
+    var donors = [];
+    
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var donor = {};
+      
+      for (var j = 0; j < headers.length; j++) {
+        var key = headers[j];
+        var value = row[j];
+        
+        if (!key) continue;
+        
+        if (key === 'amount' || key === 'personalGoal') {
+          donor[key] = value ? Number(value) : 0;
+        } else if (key === 'groupId') {
+          donor[key] = value !== '' && value !== null ? value : '';
+        } else if (key === 'nedarimMatrimId') {
+          // מספר מתרים - שומר כטקסט כדי לשמור על המספר המקורי
+          donor[key] = value !== undefined && value !== null && value !== '' ? String(value).trim() : null;
+        } else {
+          donor[key] = value !== undefined && value !== null ? value : '';
+        }
+      }
+      
+      if (donor.id) {
+        // בדיקה ש-nedarimMatrimId נטען נכון
+        if (donor.nedarimMatrimId) {
+          var matrimIdStr = String(donor.nedarimMatrimId).trim();
+          // אם זה תאריך, מזהיר
+          if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(matrimIdStr) || matrimIdStr.includes('T') || matrimIdStr.includes('Z')) {
+            Logger.log('⚠️ מתרים ' + donor.name + ' יש לו מספר מתרים לא תקין (תאריך): ' + matrimIdStr);
+          }
+        }
+        donors.push(donor);
+      }
+    }
+    
+    // ספירת מתרים עם מספר מתרים תקין
+    var donorsWithValidMatrimId = 0;
+    for (var k = 0; k < donors.length; k++) {
+      if (donors[k].nedarimMatrimId) {
+        var idStr = String(donors[k].nedarimMatrimId).trim();
+        if (/^\d+$/.test(idStr)) {
+          donorsWithValidMatrimId++;
+        }
+      }
+    }
+    
+    Logger.log('📥 נטענו ' + donors.length + ' מתרימים מהגליון');
+    Logger.log('📥 מתרימים עם מספר מתרים תקין: ' + donorsWithValidMatrimId + ' מתוך ' + donors.length);
+    
+    if (donors.length > 0 && donorsWithValidMatrimId === 0) {
+      Logger.log('⚠️ אין מתרימים עם מספר מתרים תקין! יש לקשר מתרימים למספר מתרים מנדרים פלוס דרך כפתור "סנכרון תרומות"');
+    }
+    
+    return { success: true, donors: donors, donorsWithValidMatrimId: donorsWithValidMatrimId };
+    
+  } catch (error) {
+    Logger.log('❌ שגיאה בקריאת מתרימים: ' + error.toString());
+    return { success: false, error: error.toString(), donors: [], donorsWithValidMatrimId: 0 };
+  }
+}
+
+function getAllGroups() {
+  try {
+    ensureSheetsExist();
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAMES.GROUPS);
+    
+    if (!sheet || sheet.getLastRow() <= 1) {
+      return { success: true, groups: [] };
+    }
+    
+    var data = sheet.getDataRange().getValues();
+    var headers = data[0];
+    var groups = [];
+    
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var group = {};
+      
+      for (var j = 0; j < headers.length; j++) {
+        var key = headers[j];
+        var value = row[j];
+        
+        if (!key) continue;
+        
+        if (key === 'goal' || key === 'orderNumber') {
+          group[key] = value ? Number(value) : 0;
+        } else if (key === 'showInLiveView') {
+          group[key] = value !== false && value !== 'false';
+        } else {
+          group[key] = value !== undefined && value !== null ? value : '';
+        }
+      }
+      
+      if (group.id) {
+        groups.push(group);
+      }
+    }
+    
+    return { success: true, groups: groups };
+    
+  } catch (error) {
+    Logger.log('שגיאה בקריאת קבוצות: ' + error.toString());
+    return { success: false, error: error.toString(), groups: [] };
+  }
+}
+
+function getAllSettings() {
+  try {
+    ensureSheetsExist();
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+    
+    if (!sheet || sheet.getLastRow() <= 1) {
+      return { success: true, settings: {} };
+    }
+    
+    var data = sheet.getDataRange().getValues();
+    var settings = {};
+    
+    for (var i = 1; i < data.length; i++) {
+      var key = data[i][0];
+      var value = data[i][1];
+      
+      if (key) {
+        try {
+          settings[key] = JSON.parse(value);
+        } catch (e) {
+          settings[key] = value;
+        }
+      }
+    }
+    
+    return { success: true, settings: settings };
+    
+  } catch (error) {
+    Logger.log('שגיאה בקריאת הגדרות: ' + error.toString());
+    return { success: false, error: error.toString(), settings: {} };
+  }
+}
+
+function getAllData() {
+  try {
+    var donors = getAllDonors();
+    var groups = getAllGroups();
+    var settings = getAllSettings();
+    
+    return {
+      success: true,
+      donors: donors.donors || [],
+      groups: groups.groups || [],
+      settings: settings.settings || {},
+      timestamp: new Date().toISOString()
+    };
+    
+  } catch (error) {
+    Logger.log('שגיאה בקריאת כל הנתונים: ' + error.toString());
+    return { success: false, error: error.toString() };
+  }
+}
+
+// *****************************************************************************
+// *** שמירת נתונים ***
+// *****************************************************************************
+
+function saveDonors(donors, groups) {
+  try {
+    ensureSheetsExist();
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAMES.DONORS);
+    
+    // מחיקת נתונים ישנים - משתמש ב-clearContent במקום deleteRows כדי למנוע שגיאת שורות מוקפאות
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      var lastCol = sheet.getLastColumn() || DONOR_COLUMNS.length;
+      sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+    }
+    
+    if (!donors || donors.length === 0) {
+      return { success: true, message: 'אין מתרימים לשמירה', count: 0 };
+    }
+    
+    // בניית מפת קבוצות (id -> name)
+    var groupsMap = {};
+    if (groups && groups.length > 0) {
+      for (var g = 0; g < groups.length; g++) {
+        groupsMap[groups[g].id] = groups[g].name || '';
+      }
+    } else {
+      // אם אין קבוצות, ננסה לקרוא מהגיליון
+      var groupsResult = getAllGroups();
+      if (groupsResult.groups) {
+        for (var g = 0; g < groupsResult.groups.length; g++) {
+          groupsMap[groupsResult.groups[g].id] = groupsResult.groups[g].name || '';
+        }
+      }
+    }
+    
+    // בניית שורות
+    var rows = [];
+    var now = new Date().toISOString();
+    
+    for (var i = 0; i < donors.length; i++) {
+      var donor = donors[i];
+      var row = [];
+      
+      for (var j = 0; j < DONOR_COLUMNS.length; j++) {
+        var col = DONOR_COLUMNS[j];
+        
+        switch(col) {
+          case 'groupName':
+            row.push(groupsMap[donor.groupId] || '');
+            break;
+          case 'updatedAt':
+            row.push(now);
+            break;
+          case 'createdAt':
+            row.push(donor.createdAt || now);
+            break;
+          case 'source':
+            row.push(donor.source || donor.fromNedarimPlus ? 'nedarim_plus' : 'manual');
+            break;
+          case 'nedarimMatrimId':
+            // מספר מתרים - שומר כטקסט כדי לשמור על המספר המקורי
+            var matrimId = donor.nedarimMatrimId;
+            var matrimIdStr = matrimId !== undefined && matrimId !== null && matrimId !== '' ? String(matrimId).trim() : '';
+            
+            // בודק אם זה מספר אמיתי (לא תאריך)
+            if (matrimIdStr) {
+              // אם זה תאריך או לא מספר תקין, לא שומר אותו
+              var isDate = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(matrimIdStr) || matrimIdStr.includes('T') || matrimIdStr.includes('Z');
+              var isNumeric = /^\d+$/.test(matrimIdStr);
+              
+              if (isDate || !isNumeric) {
+                Logger.log('⚠️ מתרים ' + donor.name + ' יש לו מספר מתרים לא תקין (תאריך או לא מספרי): ' + matrimIdStr + ' - לא שומר לגליון');
+                row.push(''); // לא שומר תאריך או מספר לא תקין
+              } else {
+                // זה מספר תקין - שומר אותו
+                Logger.log('✅ שומר מספר מתרים תקין למתרים ' + donor.name + ': ' + matrimIdStr);
+                row.push(matrimIdStr);
+              }
+            } else {
+              // אין מספר מתרים
+              row.push('');
+            }
+            break;
+          default:
+            var value = donor[col];
+            row.push(value !== undefined && value !== null ? value : '');
+        }
+      }
+      
+      rows.push(row);
+    }
+    
+    // כתיבה לגיליון
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, DONOR_COLUMNS.length).setValues(rows);
+    }
+    
+    // בדיקה כמה מתרים יש להם מספר מתרים תקין
+    var donorsWithMatrimId = 0;
+    for (var k = 0; k < donors.length; k++) {
+      if (donors[k].nedarimMatrimId && String(donors[k].nedarimMatrimId).trim() !== '') {
+        var matrimIdStr = String(donors[k].nedarimMatrimId).trim();
+        var isNumeric = /^\d+$/.test(matrimIdStr);
+        if (isNumeric) {
+          donorsWithMatrimId++;
+        }
+      }
+    }
+    
+    Logger.log('נשמרו ' + donors.length + ' מתרימים');
+    Logger.log('מתרימים עם מספר מתרים תקין: ' + donorsWithMatrimId + ' מתוך ' + donors.length);
+    return { success: true, message: 'נשמרו ' + donors.length + ' מתרימים', count: donors.length, donorsWithMatrimId: donorsWithMatrimId };
+    
+  } catch (error) {
+    Logger.log('שגיאה בשמירת מתרימים: ' + error.toString());
+    return { success: false, error: error.toString() };
+  }
+}
+
+function saveGroups(groups) {
+  try {
+    ensureSheetsExist();
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAMES.GROUPS);
+    
+    // מחיקת נתונים ישנים - משתמש ב-clearContent במקום deleteRows
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      var lastCol = sheet.getLastColumn() || GROUP_COLUMNS.length;
+      sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+    }
+    
+    if (!groups || groups.length === 0) {
+      return { success: true, message: 'אין קבוצות לשמירה', count: 0 };
+    }
+    
+    // בניית שורות
+    var rows = [];
+    var now = new Date().toISOString();
+    
+    for (var i = 0; i < groups.length; i++) {
+      var group = groups[i];
+      var row = [];
+      
+      for (var j = 0; j < GROUP_COLUMNS.length; j++) {
+        var col = GROUP_COLUMNS[j];
+        
+        switch(col) {
+          case 'updatedAt':
+            row.push(now);
+            break;
+          case 'createdAt':
+            row.push(group.createdAt || now);
+            break;
+          case 'showInLiveView':
+            row.push(group.showInLiveView !== false);
+            break;
+          default:
+            var value = group[col];
+            row.push(value !== undefined && value !== null ? value : '');
+        }
+      }
+      
+      rows.push(row);
+    }
+    
+    // כתיבה לגיליון
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, GROUP_COLUMNS.length).setValues(rows);
+    }
+    
+    Logger.log('נשמרו ' + groups.length + ' קבוצות');
+    return { success: true, message: 'נשמרו ' + groups.length + ' קבוצות', count: groups.length };
+    
+  } catch (error) {
+    Logger.log('שגיאה בשמירת קבוצות: ' + error.toString());
+    return { success: false, error: error.toString() };
+  }
+}
+
+function saveSettings(settings) {
+  try {
+    ensureSheetsExist();
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+    
+    // מחיקת נתונים ישנים - משתמש ב-clearContent במקום deleteRows כדי למנוע שגיאת שורות מוקפאות
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      var lastCol = sheet.getLastColumn() || 2;
+      sheet.getRange(2, 1, lastRow - 1, lastCol).clearContent();
+    }
+    
+    if (!settings || Object.keys(settings).length === 0) {
+      return { success: true, message: 'אין הגדרות לשמירה', count: 0 };
+    }
+    
+    // בניית שורות
+    var rows = [];
+    var keys = Object.keys(settings);
+    
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var value = settings[key];
+      
+      if (typeof value === 'object') {
+        value = JSON.stringify(value);
+      }
+      
+      rows.push([key, value]);
+    }
+    
+    // כתיבה לגיליון
+    if (rows.length > 0) {
+      sheet.getRange(2, 1, rows.length, 2).setValues(rows);
+    }
+    
+    Logger.log('נשמרו ' + keys.length + ' הגדרות');
+    return { success: true, message: 'נשמרו ' + keys.length + ' הגדרות', count: keys.length };
+    
+  } catch (error) {
+    Logger.log('שגיאה בשמירת הגדרות: ' + error.toString());
+    return { success: false, error: error.toString() };
+  }
+}
+
+function saveAllData(data) {
+  try {
+    var results = {};
+    
+    // שומרים קבוצות קודם
+    if (data.groups) {
+      results.groups = saveGroups(data.groups);
+    }
+    
+    // שומרים מתרימים עם הקבוצות
+    if (data.donors) {
+      results.donors = saveDonors(data.donors, data.groups);
+    }
+    
+    // שומרים הגדרות
+    if (data.settings) {
+      results.settings = saveSettings(data.settings);
+    }
+    
+    return {
+      success: true,
+      results: results,
+      timestamp: new Date().toISOString()
+    };
+    
+  } catch (error) {
+    Logger.log('שגיאה בשמירת כל הנתונים: ' + error.toString());
+    return { success: false, error: error.toString() };
+  }
+}
+
+// *****************************************************************************
+// *** פונקציות PropertiesService (לשימוש עם storageSetItem/storageGetItem) ***
+// *****************************************************************************
+
+/**
+ * שמירת ערך ב-PropertiesService
+ * @param {String} key - מפתח
+ * @param {String} value - ערך (JSON string או string רגיל)
+ */
+function storageSetItemHandler(key, value) {
+  try {
+    if (!key) {
+      return { success: false, error: 'Missing key parameter' };
+    }
+    
+    var props = PropertiesService.getScriptProperties();
+    props.setProperty(key, value);
+    
+    Logger.log('נשמר ב-PropertiesService: ' + key + ' (אורך: ' + value.length + ')');
+    return { success: true, message: 'נשמר בהצלחה' };
+    
+  } catch (error) {
+    Logger.log('שגיאה בשמירה ב-PropertiesService: ' + error.toString());
+    return { success: false, error: error.toString() };
+  }
+}
+
+/**
+ * טעינת ערך מ-PropertiesService
+ * @param {String} key - מפתח
+ */
+function storageGetItemHandler(key) {
+  try {
+    if (!key) {
+      return { success: false, error: 'Missing key parameter', value: null };
+    }
+    
+    var props = PropertiesService.getScriptProperties();
+    var value = props.getProperty(key);
+    
+    if (value === null) {
+      return { success: true, value: null, message: 'לא נמצא ערך' };
+    }
+    
+    Logger.log('נטען מ-PropertiesService: ' + key + ' (אורך: ' + value.length + ')');
+    return { success: true, value: value };
+    
+  } catch (error) {
+    Logger.log('שגיאה בטעינה מ-PropertiesService: ' + error.toString());
+    return { success: false, error: error.toString(), value: null };
+  }
+}
+
+// *****************************************************************************
+// *** פונקציית בדיקה ***
+// *****************************************************************************
+
+function testConnection() {
+  Logger.log('=== בדיקת חיבור ===');
+  
+  // בדיקת גיליון
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    Logger.log('✅ גיליון נפתח בהצלחה: ' + ss.getName());
+  } catch (e) {
+    Logger.log('❌ שגיאה בפתיחת גיליון: ' + e.message);
+    return { success: false, error: 'לא ניתן לפתוח את הגיליון' };
+  }
+  
+  // בדיקת נדרים פלוס
+  var nedarimResult = getNedarimTotalDonations();
+  Logger.log('נדרים פלוס: ' + JSON.stringify(nedarimResult));
+  
+  // בדיקת נתונים
+  var data = getAllData();
+  Logger.log('מתרימים: ' + (data.donors ? data.donors.length : 0));
+  Logger.log('קבוצות: ' + (data.groups ? data.groups.length : 0));
+  
+  return {
+    success: true,
+    spreadsheet: ss.getName(),
+    nedarimPlus: nedarimResult,
+    donorsCount: data.donors ? data.donors.length : 0,
+    groupsCount: data.groups ? data.groups.length : 0
+  };
+}
